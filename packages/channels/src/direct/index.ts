@@ -1,4 +1,9 @@
-import type { ChannelAdapter } from '../index';
+import type { ChannelAdapter, ChannelRate, ChannelTaxProfile } from '../index';
+
+const TAX_PROFILE: ChannelTaxProfile = {
+  quotingGross: false,
+  taxRules: [],
+};
 
 /**
  * Direct booking widget adapter.
@@ -7,16 +12,16 @@ import type { ChannelAdapter } from '../index';
  */
 export class DirectBookingAdapter implements ChannelAdapter {
   readonly name = 'direct';
+  readonly taxProfile: ChannelTaxProfile = TAX_PROFILE;
 
   async pushInventory(_params: {
     roomType: string;
     date: string;
-    rate: number;
+    rate: ChannelRate;
     available: number;
     closed: boolean;
   }) {
     // Direct bookings don't need external sync
-    // Inventory is already in the database
     return { success: true, syncId: 'local' };
   }
 
@@ -27,7 +32,7 @@ export class DirectBookingAdapter implements ChannelAdapter {
       checkIn: string;
       checkOut: string;
       roomType: string;
-      rate: number;
+      rate: ChannelRate;
     };
 
     return {

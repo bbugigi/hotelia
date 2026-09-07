@@ -20,6 +20,29 @@
 
 ---
 
+## Revision Log
+
+**v1.1 — September 2026 (desktop-console pivot + operational-hardening pass)**
+
+Two material revisions were made after a high-risk review of the v1.0 spec and scaffold:
+
+- **Staff interface is now a native desktop console, not websites.** `apps/web`
+  was replaced by `apps/console` (Electron + React + Vite): Front Desk, Housekeeping,
+  POS, Messaging, Work Orders, Revenue, Settings. The console ships its own local backend
+  (REST + SSE broker on `:3110`), a durable offline mutation queue, and a LAN smart-lock
+  encoder bridge. Guest PWA (`apps/guest`) and kitchen tablet display (`apps/kds`) remain
+  web touchpoints by design (zero-download, device-mounted).
+- **Seven loopholes found in review were closed in code:**
+  1. _Offline front desk_ → offline queue + local lock bridge (`apps/console/src/main`).
+  2. _Multi-folio split billing_ → `FolioType`, `FolioTransfer`, `transferFolioItem`.
+  3. _POS charge disputes_ → `PosValidation`, `GuestSession` tokens, device/IP audit fields.
+  4. _Overbooking races_ → `atomicReserveRoom` / `lockChannelInventory` (`SELECT … FOR UPDATE`).
+  5. _Night-audit freeze_ → immutable `BusinessDay` close + reversal-only corrections (`reverseLineItem`).
+  6. _OTA tax parity_ → `TaxEngine.normalizeRate` (Net + itemized tax) enforced on all adapters.
+  7. _KDS stale state_ → persistent SSE `/stream` broker with heartbeat + auto-reconnect.
+
+---
+
 ## 1. Executive Summary
 
 Hotelia is a **cloud-native, all-in-one hotel management platform** built to replace fragmented legacy systems — PMS, RMS, CRS, POS, CRM, Work Order Management, and Guest Communication — with a **single unified data core** powered by an event-driven architecture.

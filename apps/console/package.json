@@ -1,0 +1,40 @@
+{
+  "name": "@hotelia/console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hotelia Desktop Console — offline-first front desk, housekeeping, POS, messaging, maintenance",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "dev": "vite --port 3010 --strictPort",
+    "dev:electron": "tsc -p tsconfig.main.json && cross-env VITE_DEV_URL=http://localhost:3010 electron .",
+    "build": "npm run build:renderer && npm run build:main",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "start": "electron .",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.main.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@hotelia/database": "*",
+    "@hotelia/shared": "*",
+    "@hotelia/events": "*",
+    "@hotelia/channels": "*",
+    "@hotelia/integrations": "*",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "dexie": "^4.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "electron": "^36.0.0",
+    "vite": "^6.3.0",
+    "@vitejs/plugin-react": "^4.5.0",
+    "typescript": "~5.9.3",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/express": "^4.17.0",
+    "@types/cors": "^2.8.0",
+    "cross-env": "^7.0.3"
+  }
+}

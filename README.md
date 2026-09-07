@@ -13,19 +13,24 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the complete technical blueprint, i
 - Module-by-module functional specs
 - MVP roadmap and deployment strategy
 
+**Product decision:** the property team operates a native **desktop console**, not websites.
+Only the guest zero-download interface and the kitchen/tablet displays remain web touchpoints.
+
 ## Monorepo Structure
 
 ```
 hotelia/
 ├── apps/
-│   ├── web/     # Staff dashboard (Next.js 16, port 3000)
+│   ├── console/ # Desktop console (Electron + React). Front desk, housekeeping, POS,
+│   │            #   messaging, work orders, revenue. Offline-first with local backend
+│   │            #   (REST + SSE broker on :3110) and LAN lock-encoder bridge. Run: electron .
 │   ├── guest/   # Guest PWA (Next.js 16, port 3001) — offline-first
-│   └── kds/     # Kitchen Display System (Next.js 16, port 3002)
+│   └── kds/     # Kitchen Display System (Next.js 16, port 3002) — live SSE stream
 ├── packages/
-│   ├── database/    # Prisma schema, client, seed (PostgreSQL)
-│   ├── shared/      # Shared types, validators (Zod), constants, utils
-│   ├── events/      # Domain event bus (Redis Streams) + handler registry
-│   ├── channels/    # OTA adapters (Booking.com, Expedia, Airbnb, Direct)
+│   ├── database/    # Prisma schema, client, seed (PostgreSQL); inventory-lock + ledger services
+│   ├── shared/      # Types, validators (Zod), constants, utils, TaxEngine
+│   ├── events/      # Domain event bus (Redis Streams) + handler registry + registry
+│   ├── channels/    # OTA adapters (Booking.com, Expedia, Airbnb, Direct) — Net+tax normalized
 │   └── integrations/# Smart locks, PBX, payment hardware adapters
 └── infra/
     ├── docker/      # Dockerfile + docker-compose (Postgres, Redis, etc.)
@@ -61,11 +66,25 @@ npm run dev
 
 Apps:
 
-- **Staff dashboard:** http://localhost:3000 (/login)
+- **Desktop console:** `npm --workspace @hotelia/console run build` then `npm --workspace @hotelia/console run start`,
+  or dev with `npm --workspace @hotelia/console run dev` + `npm --workspace @hotelia/console run dev:electron`.
+  Embeds the local REST + SSE broker at `http://localhost:3110` and the offline sync / lock-bridge daemon.
 - **Guest PWA:** http://localhost:3001
-- **Kitchen display:** http://localhost:3002
+- **Kitchen display:** http://localhost:3002 (live via SSE, auto-reconnect)
 - **Adminer (DB viewer):** http://localhost:8080
 - **Mailpit (email testing):** http://localhost:8025
+
+## Resilience & Financial-Controls Notes (hardening pass)
+
+| Concern                         | Where it lives                                                                                            |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Offline front desk (Wi-Fi drop) | `apps/console` — IndexedDB + disk queue, `lockBridge` TCP/serial encode, `OfflineSyncEngine`              |
+| Multi-folio split billing       | `Folio.type` (MASTER/COMPANY/PERSONAL/SPLIT), `FolioTransfer`, `transferFolioItem` in `@hotelia/database` |
+| POS charge disputes             | `PosOrder.validation/deviceFingerprint/ipAddress/sessionId`, `GuestSession` token model                   |
+| Overbooking race                | `atomicReserveRoom` / `lockChannelInventory` — `SELECT … FOR UPDATE` under Serializable isolation         |
+| Night-audit immutability        | `BusinessDay` freeze + `closeBusinessDay`; corrections only via `reverseLineItem` reversal ledger         |
+| OTA tax parity                  | `TaxEngine.normalizeRate` in `@hotelia/shared`; every adapter emits Net + itemized tax                    |
+| KDS staleness                   | SSE `/stream` broker on the console (heartbeat, auto-reconnect) instead of REST polling                   |
 
 ## Common Commands
 

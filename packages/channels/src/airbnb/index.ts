@@ -1,7 +1,14 @@
-import type { ChannelAdapter } from '../index';
+import { TaxEngine } from '@hotelia/shared';
+import type { ChannelAdapter, ChannelRate, ChannelTaxProfile } from '../index';
+
+const TAX_PROFILE: ChannelTaxProfile = {
+  quotingGross: false,
+  taxRules: [{ id: 'city_tax', name: 'Guest city tax', rate: 0.04 }],
+};
 
 export class AirbnbAdapter implements ChannelAdapter {
   readonly name = 'airbnb';
+  readonly taxProfile: ChannelTaxProfile = TAX_PROFILE;
 
   private apiKey: string;
 
@@ -12,16 +19,47 @@ export class AirbnbAdapter implements ChannelAdapter {
   async pushInventory(_params: {
     roomType: string;
     date: string;
-    rate: number;
+    rate: ChannelRate;
     available: number;
     closed: boolean;
   }) {
-    // TODO: Airbnb uses iCal for basic sync; full API via Airbnb Professional Host API
+    // TODO: Airbnb iCal / Professional Host API using _params.rate.netAmount
     return { success: false, syncId: 'not_implemented' };
   }
 
-  async receiveBooking(_rawPayload: unknown) {
-    return Promise.reject(new Error('Not implemented'));
+  async receiveBooking(rawPayload: unknown) {
+    const payload = rawPayload as {
+      guestName?: string;
+      checkIn?: string;
+      checkOut?: string;
+      roomType?: string;
+      netAmount?: number;
+      confirmationNo?: string;
+      channelRef?: string;
+    };
+
+    if (typeof payload.netAmount !== 'number') {
+      return Promise.reject(new Error('Airbnb payload missing netAmount'));
+    }
+
+    const rate = TaxEngine.normalizeRate({
+      amount: payload.netAmount,
+      currency: 'USD',
+      isGross: false,
+      taxRules: [...this.taxProfile.taxRules],
+    });
+
+    return {
+      confirmationNo:
+        payload.confirmationNo ??
+        `ABNB-${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
+      guestName: payload.guestName ?? 'Unknown',
+      checkIn: payload.checkIn ?? '',
+      checkOut: payload.checkOut ?? '',
+      roomType: payload.roomType ?? 'STANDARD',
+      rate,
+      channelRef: payload.channelRef ?? '',
+    };
   }
 
   async cancelBooking(_channelRef: string, _reason?: string) {
