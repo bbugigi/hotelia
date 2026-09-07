@@ -1,0 +1,36 @@
+{
+  "name": "hotelia",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@11.13.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "db:generate": "npm run generate -w packages/database",
+    "db:push": "npm run push -w packages/database",
+    "db:migrate": "npm run migrate -w packages/database",
+    "db:seed": "npm run seed -w packages/database",
+    "db:studio": "npm run studio -w packages/database",
+    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "turbo": "^2.10.0",
+    "prettier": "^3.9.0",
+    "husky": "^9.1.0",
+    "lint-staged": "^17.5.0",
+    "typescript": "~5.9.3"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,md}": [
+      "prettier --write"
+    ]
+  }
+}

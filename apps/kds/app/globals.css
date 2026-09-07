@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* KDS is dark-themed for kitchen environments */
+html,
+body {
+  height: 100%;
+}
+
+/* large touch targets */
+button {
+  min-height: 44px;
+}
