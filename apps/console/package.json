@@ -6,11 +6,11 @@
   "main": "dist/main/index.js",
   "scripts": {
     "dev": "vite --port 3010 --strictPort",
-    "dev:electron": "tsc -p tsconfig.main.json && cross-env VITE_DEV_URL=http://localhost:3010 electron .",
+    "dev:electron": "npm run build:main && cross-env VITE_DEV_URL=http://localhost:3010 electron . --no-sandbox",
     "build": "npm run build:renderer && npm run build:main",
     "build:renderer": "vite build",
     "build:main": "tsc -p tsconfig.main.json",
-    "start": "electron .",
+    "start": "electron . --no-sandbox",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.main.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
