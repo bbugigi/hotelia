@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type { CommandResult } from '../main/ipcWrap';
 import type { OfflineActionRecord } from '../main/offline/store';
+import type { MpesaLedgerSummary, PaymentLedgerRow } from '../main/offline/store';
 import type { SyncStatus } from '../main/offline/sync';
 import type {
   EncodeRequest,
@@ -15,6 +16,10 @@ import type {
   PosVerification,
 } from '../main/pms';
 import type {
+  PaymentConfirmationInput,
+  PaymentMatchInput,
+  PaymentMethod,
+  PaymentRecordInput,
   SyncEnqueueInput,
   LockEncodeInput,
   LockLinkInput,
@@ -67,8 +72,22 @@ export interface ConsoleBridge {
         server: { url: string; port: number; token: string };
         db: { available: boolean };
         propertyId: string | null;
+        currency: string;
       }>
     >;
+  };
+  readonly win: {
+    control(
+      action: 'minimize' | 'toggle-maximize' | 'close',
+    ): Promise<CommandResult<{ action: string }>>;
+    subscribeMaximized(on: (maximized: boolean) => void): () => void;
+  };
+  readonly payments: {
+    recordIntent(input: PaymentRecordInput): Promise<CommandResult<PaymentLedgerRow>>;
+    recordConfirmation(input: PaymentConfirmationInput): Promise<CommandResult<PaymentLedgerRow>>;
+    match(input: PaymentMatchInput): Promise<CommandResult<PaymentLedgerRow | null>>;
+    list(): Promise<CommandResult<PaymentLedgerRow[]>>;
+    summary(): Promise<CommandResult<MpesaLedgerSummary>>;
   };
 }
 
@@ -76,6 +95,12 @@ function subscribeToSync(on: (status: SyncStatus) => void): () => void {
   const listener = (_e: IpcRendererEvent, status: SyncStatus): void => on(status);
   ipcRenderer.on('sync:updated', listener);
   return () => ipcRenderer.removeListener('sync:updated', listener);
+}
+
+function subscribeToMaximized(on: (maximized: boolean) => void): () => void {
+  const listener = (_e: IpcRendererEvent, maximized: boolean): void => on(maximized);
+  ipcRenderer.on('win:maximized', listener);
+  return () => ipcRenderer.removeListener('win:maximized', listener);
 }
 
 export const bridge: ConsoleBridge = Object.freeze({
@@ -104,6 +129,19 @@ export const bridge: ConsoleBridge = Object.freeze({
   conf: Object.freeze({
     get: () => ipcRenderer.invoke('conf:get', undefined),
   }),
+  win: Object.freeze({
+    control: (action: 'minimize' | 'toggle-maximize' | 'close') =>
+      ipcRenderer.invoke('win:control', { action }),
+    subscribeMaximized: subscribeToMaximized,
+  }),
+  payments: Object.freeze({
+    recordIntent: (input: PaymentRecordInput) => ipcRenderer.invoke('payments:recordIntent', input),
+    recordConfirmation: (input: PaymentConfirmationInput) =>
+      ipcRenderer.invoke('payments:recordConfirmation', input),
+    match: (input: PaymentMatchInput) => ipcRenderer.invoke('payments:match', input),
+    list: () => ipcRenderer.invoke('payments:list', undefined),
+    summary: () => ipcRenderer.invoke('payments:summary', undefined),
+  }),
 });
 
 contextBridge.exposeInMainWorld('hotelia', bridge);
@@ -122,4 +160,6 @@ export type {
   HousekeepingTask,
   PosVerification,
   PosChargeResult,
+  PaymentLedgerRow,
+  MpesaLedgerSummary,
 };

@@ -1,83 +1,92 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { ConsoleConfig } from '../App';
 import { unwrap, requireBridge } from '../offline/sync-client';
+import { appStore } from '../app-store';
 import type { HousekeepingTask } from '../types';
 
-function pillClass(status: string): string {
-  if (status.startsWith('OCCUPIED')) return 'pill occupied';
-  if (status.startsWith('VACANT_CLEAN') || status.startsWith('VACANT_INSPECTED'))
-    return 'pill clean';
-  if (status.startsWith('VACANT_DIRTY')) return 'pill dirty';
-  return 'pill ooo';
-}
+/**
+ * Housekeeping — live room cleaning and inspection tasks.
+ * Task-board view grouped by status, driven by the read-only cache.
+ */
 
-function statusLabel(status: string): string {
-  return status.toLowerCase().replace(/_/g, ' ');
-}
+const GROUPS = [
+  ['VACANT_DIRTY', 'Dirty'],
+  ['VACANT_CLEAN', 'Clean'],
+  ['INSPECTED', 'Inspected'],
+  ['OOO', 'Out of order'],
+] as const;
 
 export function Housekeeping({ config }: { config: ConsoleConfig | null }) {
   const propertyId = config?.propertyId ?? null;
-
   const [tasks, setTasks] = useState<HousekeepingTask[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!propertyId || !window.hotelia) return;
+    setLoading(true);
+    try {
+      const res = await unwrap(requireBridge().housekeeping.tasks(propertyId));
+      setTasks(res);
+      appStore.setTasks(res);
+    } catch (err) {
+      setTasks([]);
+      void appStore;
+    } finally {
+      setLoading(false);
+    }
+  }, [propertyId]);
 
   useEffect(() => {
-    if (!propertyId) {
-      setError('Set HOTELIA_PROPERTY_ID to load housekeeping from the property database.');
-      return;
-    }
-    if (!window.hotelia) return;
-    void unwrap(requireBridge().housekeeping.tasks(propertyId))
-      .then((rows) => {
-        setTasks(rows);
-        setError(null);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, [propertyId]);
+    void refresh();
+  }, [refresh]);
+
+  const byStatus = useCallback(
+    (status: string) =>
+      tasks.filter(
+        (t) =>
+          t.status === status ||
+          (status === 'INSPECTED' && t.status === 'VACANT_INSPECTED') ||
+          (status === 'OOO' && t.status.startsWith('OOO')),
+      ),
+    [tasks],
+  );
 
   return (
     <div>
       <h1>Housekeeping</h1>
       <p className="muted">
-        Live room status from Prisma: each row reflects the current Room status, today's departures
-        and open work-orders for that room.
+        Room cleaning status live from the local database. Open work orders are surfaced per room.
       </p>
-
-      {error && <p className="result error">{error}</p>}
-
-      <table>
-        <thead>
-          <tr>
-            <th>Room</th>
-            <th>Status</th>
-            <th>Departure today</th>
-            <th>Open work orders</th>
-          </tr>
-        </thead>
-        <tbody>
-          {tasks.map((t) => (
-            <tr key={t.roomId}>
-              <td>{t.roomNumber}</td>
-              <td>
-                <span className={pillClass(t.status)}>{statusLabel(t.status)}</span>
-              </td>
-              <td>{t.hasDeparture ? 'Yes' : '—'}</td>
-              <td>
-                {t.openWorkOrders > 0
-                  ? `${t.openWorkOrders} · ${t.workOrderSubjects.join(', ')}`
-                  : '—'}
-              </td>
-            </tr>
-          ))}
-          {tasks.length === 0 && !error && (
-            <tr>
-              <td colSpan={4} className="muted">
-                No rooms loaded yet.
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+      <button className="muted" onClick={() => void refresh()} disabled={loading}>
+        {loading ? 'Loading…' : 'Refresh'}
+      </button>
+      <div className="task-board">
+        {GROUPS.map(([status, label]) => {
+          const items = byStatus(status);
+          return (
+            <div key={status} className="task-column">
+              <h3 className="task-column-title">
+                {label} <span className="muted">{items.length}</span>
+              </h3>
+              {items.length === 0 && <p className="muted small">—</p>}
+              {items.map((t) => (
+                <div key={t.roomId} className="task-card">
+                  <div className="task-card-head">
+                    <strong>Room {t.roomNumber}</strong>
+                  </div>
+                  <div className="small muted">
+                    Departure today: {t.hasDeparture ? 'yes' : 'no'} · Work orders:{' '}
+                    {t.openWorkOrders}
+                  </div>
+                  {t.workOrderSubjects.length > 0 && (
+                    <div className="small">{t.workOrderSubjects.join(' · ')}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

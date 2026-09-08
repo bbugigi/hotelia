@@ -129,8 +129,53 @@ export const syncActionSchema = z.enum([
   'posOrder',
   'folioTransfer',
   'maintenanceOrder',
+  'etimsInvoice',
 ]);
 export type SyncAction = z.infer<typeof syncActionSchema>;
+
+// ──────────────────────────────────────────────
+// Local payments / M-Pesa reconciliation ledger
+// (Kenya-first: Till & Paybill are treated as first-class)
+// ──────────────────────────────────────────────
+
+export const paymentMethodSchema = z.enum(['CASH', 'MPESA_TILL', 'MPESA_PAYBILL', 'CARD']);
+export type PaymentMethod = z.infer<typeof paymentMethodSchema>;
+
+export const paymentRecordSchema = z.object({
+  method: paymentMethodSchema,
+  amount: z.number().positive().max(10_000_000),
+  currency: z.string().length(3).default('KES'),
+  guestName: z.string().min(1).max(200),
+  roomNumber: z.string().min(1).max(10),
+  reference: z.string().min(1).max(128).optional(),
+  folioId: z.string().uuid().optional(),
+  reservationId: z.string().uuid().optional(),
+  idempotencyKey: z.string().min(8).max(128),
+  operatorId: z.string().uuid().optional(),
+});
+export type PaymentRecordInput = z.infer<typeof paymentRecordSchema>;
+
+export const paymentConfirmationSchema = z.object({
+  receipt: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[a-zA-Z0-9]+$/),
+  amount: z.number().positive().max(10_000_000),
+  currency: z.string().length(3).default('KES'),
+  method: paymentMethodSchema,
+  reference: z.string().min(1).max(128).optional(),
+  phoneTail: z.string().max(4).optional(),
+  idempotencyKey: z.string().min(8).max(128),
+});
+export type PaymentConfirmationInput = z.infer<typeof paymentConfirmationSchema>;
+
+export const paymentMatchSchema = z.object({
+  confirmationId: z.string().uuid(),
+  intentId: z.string().uuid(),
+  operatorId: z.string().uuid().optional(),
+});
+export type PaymentMatchInput = z.infer<typeof paymentMatchSchema>;
 
 export const syncEnqueueSchema = z.object({
   idempotencyKey: z.string().min(8).max(128),

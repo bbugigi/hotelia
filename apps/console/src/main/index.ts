@@ -1,15 +1,22 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
+import { z } from 'zod';
 import {
   ipcNoArgsSchema,
   lockEncodeSchema,
   lockLinkSchema,
+  paymentConfirmationSchema,
+  paymentMatchSchema,
+  paymentRecordSchema,
   posChargeSchema,
   posVerifySchema,
   propertyQuerySchema,
   syncEnqueueSchema,
   type LockEncodeInput,
   type LockLinkInput,
+  type PaymentConfirmationInput,
+  type PaymentMatchInput,
+  type PaymentRecordInput,
 } from '@hotelia/shared';
 import { EVENT_TYPES } from '@hotelia/events';
 import { OfflineActionStore } from './offline/store';
@@ -42,7 +49,9 @@ function createWindow(): void {
     minWidth: 1024,
     minHeight: 700,
     title: 'Hotelia Console',
-    backgroundColor: '#0f172a',
+    backgroundColor: '#0b1220',
+    autoHideMenuBar: true,
+    frame: false,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -58,13 +67,41 @@ function createWindow(): void {
     void mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
+  mainWindow.on('maximize', () => broadcast('win:maximized', true));
+  mainWindow.on('unmaximize', () => broadcast('win:maximized', false));
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
 }
 
-function registerIpc(bridge: { sync: OfflineSyncEngine; locks: LockBridgeController }): void {
-  const { sync, locks } = bridge;
+function registerWindowIpc(): void {
+  const winControlSchema = z.object({
+    action: z.enum(['minimize', 'toggle-maximize', 'close']),
+  });
+  ipcMain.handle(
+    'win:control',
+    wrapIpc(
+      'win:control',
+      winControlSchema,
+      ({ action }: { action: 'minimize' | 'toggle-maximize' | 'close' }) => {
+        const win = mainWindow ?? BrowserWindow.getFocusedWindow();
+        if (!win) return { action: 'none' };
+        if (action === 'minimize') win.minimize();
+        if (action === 'toggle-maximize') win.isMaximized() ? win.unmaximize() : win.maximize();
+        if (action === 'close') win.close();
+        return { action };
+      },
+    ),
+  );
+}
+
+function registerIpc(bridge: {
+  sync: OfflineSyncEngine;
+  locks: LockBridgeController;
+  store: OfflineActionStore;
+}): void {
+  const { sync, locks, store } = bridge;
 
   // ── Offline queue (single SQLite writer) ────────────────────────────────
   ipcMain.handle(
@@ -127,7 +164,38 @@ function registerIpc(bridge: { sync: OfflineSyncEngine; locks: LockBridgeControl
       server: getServerConfig(),
       db: { available: isDbAvailable() },
       propertyId: process.env.HOTELIA_PROPERTY_ID ?? null,
+      currency: process.env.HOTELIA_CURRENCY ?? 'KES',
     })),
+  );
+
+  // ── Local M-Pesa / cash reconciliation ledger (Kenya-first payments) ─────
+  ipcMain.handle(
+    'payments:recordIntent',
+    wrapIpc('payments:recordIntent', paymentRecordSchema, (input: PaymentRecordInput) =>
+      store.recordIntent(input),
+    ),
+  );
+  ipcMain.handle(
+    'payments:recordConfirmation',
+    wrapIpc(
+      'payments:recordConfirmation',
+      paymentConfirmationSchema,
+      (input: PaymentConfirmationInput) => store.recordConfirmation(input),
+    ),
+  );
+  ipcMain.handle(
+    'payments:match',
+    wrapIpc('payments:match', paymentMatchSchema, (input: PaymentMatchInput) =>
+      store.matchConfirmation(input.confirmationId, input.intentId, input.operatorId),
+    ),
+  );
+  ipcMain.handle(
+    'payments:list',
+    wrapIpc('payments:list', ipcNoArgsSchema, () => store.listLedger()),
+  );
+  ipcMain.handle(
+    'payments:summary',
+    wrapIpc('payments:summary', ipcNoArgsSchema, () => store.ledgerSummary()),
   );
 }
 
@@ -178,7 +246,8 @@ app.whenReady().then(() => {
   localServer = startLocalServer({ streamToken: getServerToken() });
   log.info('all-subsystems-ready');
 
-  registerIpc({ sync: syncEngine, locks: lockBridge });
+  registerWindowIpc();
+  registerIpc({ sync: syncEngine, locks: lockBridge, store });
   createWindow();
 
   app.on('activate', () => {

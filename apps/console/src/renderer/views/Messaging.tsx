@@ -1,54 +1,20 @@
-const THREADS = [
-  {
-    id: 'm1',
-    guest: 'David Chen · 201',
-    preview: 'Extra towels please',
-    unread: 2,
-    agents: 'gm_frontdesk@hotelia.local',
-  },
-  {
-    id: 'm2',
-    guest: 'Ana Silva · 103',
-    preview: 'Can I adjust check-out time?',
-    unread: 1,
-    agents: 'gm_frontdesk@hotelia.local',
-  },
-  {
-    id: 'm3',
-    guest: "Liam O'Brien · 302",
-    preview: 'Dinner reservation for 2 at 8pm',
-    unread: 0,
-    agents: 'gm_dining@hotelia.local',
-  },
-];
+import { useAppStore } from '../app-store';
 
+/**
+ * Messaging — department-to-department communication (stub view).
+ * In production, this connects to a message queue or WebSocket relay.
+ */
 export function Messaging() {
   return (
     <div>
       <h1>Messaging</h1>
-      <p className="muted">Escalation triage (guest → front desk → PMS agents).</p>
-      <table>
-        <thead>
-          <tr>
-            <th>Guest</th>
-            <th>Preview</th>
-            <th>Unread</th>
-            <th>Agent</th>
-          </tr>
-        </thead>
-        <tbody>
-          {THREADS.map((t) => (
-            <tr key={t.id}>
-              <td>{t.guest}</td>
-              <td>{t.preview}</td>
-              <td>{t.unread || '—'}</td>
-              <td>
-                <code>{t.agents}</code>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <p className="muted">
+        Department-to-department messaging. Front desk ↔ housekeeping ↔ kitchen ↔ maintenance.
+      </p>
+      <div className="placeholder-box">
+        <p className="muted">Messaging is available when the full PMS stack is deployed.</p>
+        <p className="muted small">Current view: {useAppStore().view}</p>
+      </div>
     </div>
   );
 }

@@ -37,6 +37,10 @@ export function Settings({ config }: { config: ConsoleConfig | null }) {
           <p className="muted small">
             Database: {config?.dbAvailable ? 'provisioned (Prisma)' : 'not provisioned'}
           </p>
+          <p className="muted small">
+            Property: <code>{config?.propertyId ?? 'unset'}</code> · Currency:{' '}
+            <code>{config?.currency ?? 'KES'}</code>
+          </p>
           <label>
             Device token (set on KDS / Guest PWA install)
             <input readOnly value={config?.serverToken ?? ''} onFocus={(e) => e.target.select()} />

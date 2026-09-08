@@ -1,37 +1,19 @@
-const ORDERS = [
-  { id: 'WO-1042', type: 'Plumbing', room: '204', status: 'In Progress', priority: 'High' },
-  { id: 'WO-1043', type: 'HVAC', room: 'Lobby', status: 'Open', priority: 'Normal' },
-  { id: 'WO-1044', type: 'Lock', room: '110', status: 'Open', priority: 'High' },
-];
-
+/**
+ * Work Orders — maintenance and engineering request board.
+ */
 export function WorkOrders() {
   return (
     <div>
       <h1>Work Orders</h1>
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Type</th>
-            <th>Location</th>
-            <th>Status</th>
-            <th>Priority</th>
-          </tr>
-        </thead>
-        <tbody>
-          {ORDERS.map((o) => (
-            <tr key={o.id}>
-              <td>{o.id}</td>
-              <td>{o.type}</td>
-              <td>{o.room}</td>
-              <td>
-                <span className="pill">{o.status.toLowerCase()}</span>
-              </td>
-              <td>{o.priority}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <p className="muted">
+        Maintenance and engineering requests. Create, assign, and track work orders through
+        completion — integrated with housekeeping task board.
+      </p>
+      <div className="placeholder-box">
+        <p className="muted">
+          Work order management is available when the full PMS stack is deployed.
+        </p>
+      </div>
     </div>
   );
 }

@@ -8,7 +8,13 @@
  */
 
 export type SyncAction =
-  'checkin' | 'checkout' | 'roomKeyGenerate' | 'posOrder' | 'folioTransfer' | 'maintenanceOrder';
+  | 'checkin'
+  | 'checkout'
+  | 'roomKeyGenerate'
+  | 'posOrder'
+  | 'folioTransfer'
+  | 'maintenanceOrder'
+  | 'etimsInvoice';
 
 export type ActionStatus = 'PENDING' | 'PROCESSING' | 'FAILED' | 'COMPLETED';
 
@@ -152,6 +158,63 @@ export interface PosChargeInput extends PosVerifyInput {
   operatorId?: string;
 }
 
+export type PaymentMethod = 'CASH' | 'MPESA_TILL' | 'MPESA_PAYBILL' | 'CARD';
+export type PaymentKind = 'INTENT' | 'CONFIRMATION' | 'REVERSAL';
+export type PaymentStatus = 'PENDING' | 'MATCHED' | 'UNMATCHED' | 'REVERSED';
+export type EtimsState = 'NOT_APPLICABLE' | 'QUEUED' | 'TRANSMITTED';
+
+export interface PaymentLedgerRow {
+  id: string;
+  kind: PaymentKind;
+  status: PaymentStatus;
+  etimsState: EtimsState;
+  method: PaymentMethod;
+  amount: number;
+  currency: string;
+  guestName: string;
+  roomNumber: string;
+  reference?: string;
+  receipt?: string;
+  folioId?: string;
+  reservationId?: string;
+  operatorId?: string;
+  idempotencyKey: string;
+  recordedAt: string;
+  matchedAt: string | null;
+  matchedIntentId: string | null;
+}
+
+export interface MpesaLedgerSummary {
+  pendingIntents: number;
+  unmatchedConfirmations: number;
+  matched: number;
+  reversed: number;
+  todayTotalMinorByMethod: Partial<Record<PaymentMethod, number>>;
+}
+
+export interface PaymentRecordInput {
+  method: PaymentMethod;
+  amount: number;
+  currency: string;
+  guestName: string;
+  roomNumber: string;
+  reference?: string;
+  folioId?: string;
+  reservationId?: string;
+  idempotencyKey: string;
+  operatorId?: string;
+}
+
+export interface PaymentConfirmationInput {
+  receipt: string;
+  amount: number;
+  currency: string;
+  method: PaymentMethod;
+  reference?: string;
+  phoneTail?: string;
+  idempotencyKey: string;
+}
+
 export interface ConsoleBridge {
   readonly version: string;
   readonly sync: {
@@ -181,8 +244,26 @@ export interface ConsoleBridge {
         server: { url: string; port: number; token: string };
         db: { available: boolean };
         propertyId: string | null;
+        currency: string;
       }>
     >;
+  };
+  readonly win: {
+    control(
+      action: 'minimize' | 'toggle-maximize' | 'close',
+    ): Promise<CommandResult<{ action: string }>>;
+    subscribeMaximized(on: (maximized: boolean) => void): () => void;
+  };
+  readonly payments: {
+    recordIntent(input: PaymentRecordInput): Promise<CommandResult<PaymentLedgerRow>>;
+    recordConfirmation(input: PaymentConfirmationInput): Promise<CommandResult<PaymentLedgerRow>>;
+    match(input: {
+      confirmationId: string;
+      intentId: string;
+      operatorId?: string;
+    }): Promise<CommandResult<PaymentLedgerRow | null>>;
+    list(): Promise<CommandResult<PaymentLedgerRow[]>>;
+    summary(): Promise<CommandResult<MpesaLedgerSummary>>;
   };
 }
 

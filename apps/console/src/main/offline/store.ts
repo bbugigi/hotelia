@@ -2,7 +2,12 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
-import type { SyncEnqueueInput } from '@hotelia/shared';
+import type {
+  PaymentConfirmationInput,
+  PaymentMethod,
+  PaymentRecordInput,
+  SyncEnqueueInput,
+} from '@hotelia/shared';
 import { logger } from '../logger';
 
 /**
@@ -55,6 +60,82 @@ export interface ActionStatusCounts {
   completed: number;
 }
 
+// ── Local payment reconciliation ledger (Kenya: M-Pesa Till/Paybill, cash) ─
+
+export type PaymentKind = 'INTENT' | 'CONFIRMATION' | 'REVERSAL';
+export type PaymentStatus = 'PENDING' | 'MATCHED' | 'UNMATCHED' | 'REVERSED';
+export type EtimsState = 'NOT_APPLICABLE' | 'QUEUED' | 'TRANSMITTED';
+
+export type PaymentLedgerRow = PaymentRecordInput & {
+  id: string;
+  kind: PaymentKind;
+  status: PaymentStatus;
+  etimsState: EtimsState;
+  receipt?: string;
+  recordedAt: string;
+  matchedAt: string | null;
+  matchedIntentId: string | null;
+};
+
+export interface MpesaLedgerSummary {
+  pendingIntents: number;
+  unmatchedConfirmations: number;
+  matched: number;
+  reversed: number;
+  todayTotalMinorByMethod: Partial<Record<PaymentMethod, number>>;
+}
+
+function rowToPayment(row: Record<string, unknown>): PaymentLedgerRow {
+  return {
+    id: String(row.id),
+    kind: row.kind as PaymentKind,
+    status: row.status as PaymentStatus,
+    etimsState: row.etims_state as EtimsState,
+    method: row.method as PaymentMethod,
+    amount: Number(row.amount_minor) / 100,
+    currency: String(row.currency),
+    guestName: row.guest_name ? String(row.guest_name) : (String(row.guest_name) as string),
+    roomNumber: row.room_number ? String(row.room_number) : '',
+    reference: row.reference ? String(row.reference) : undefined,
+    receipt: row.receipt ? String(row.receipt) : undefined,
+    folioId: row.folio_id ? String(row.folio_id) : undefined,
+    reservationId: row.reservation_id ? String(row.reservation_id) : undefined,
+    operatorId: row.operator_id ? String(row.operator_id) : undefined,
+    idempotencyKey: String(row.idempotency_key),
+    recordedAt: String(row.recorded_at),
+    matchedAt: row.matched_at ? String(row.matched_at) : null,
+    matchedIntentId: row.matched_intent_id ? String(row.matched_intent_id) : null,
+  };
+}
+
+const PAYMENT_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS mpesa_ledger (
+    id                TEXT PRIMARY KEY,
+    kind              TEXT NOT NULL,
+    status            TEXT NOT NULL,
+    method            TEXT NOT NULL,
+    amount_minor      INTEGER NOT NULL,
+    currency          TEXT NOT NULL,
+    reference         TEXT,
+    receipt           TEXT,
+    phone_tail        TEXT,
+    guest_name        TEXT NOT NULL,
+    room_number       TEXT,
+    folio_id          TEXT,
+    reservation_id    TEXT,
+    operator_id       TEXT,
+    etims_state       TEXT NOT NULL DEFAULT 'NOT_APPLICABLE',
+    idempotency_key   TEXT NOT NULL UNIQUE,
+    recorded_at       TEXT NOT NULL,
+    matched_at        TEXT,
+    matched_intent_id TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_ledger_status  ON mpesa_ledger(status);
+  CREATE INDEX IF NOT EXISTS idx_ledger_recorded ON mpesa_ledger(recorded_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_ledger_receipt
+    ON mpesa_ledger(receipt) WHERE kind='CONFIRMATION' AND receipt IS NOT NULL;
+`;
+
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS offline_actions (
     id              TEXT PRIMARY KEY,
@@ -97,7 +178,7 @@ export class OfflineActionStore {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
-    this.db.exec(SCHEMA);
+    this.db.exec(SCHEMA + PAYMENT_SCHEMA);
     logger.info('sqlite-ready', { dbPath });
   }
 
@@ -229,6 +310,182 @@ export class OfflineActionStore {
       )
       .get() as { ts: string | null };
     return row.ts ? new Date(row.ts).getTime() : null;
+  }
+
+  // ── Local payment reconciliation ledger ─────────────────────────────────
+  // First-class M-Pesa (Till/Paybill) + cash payments. `INTENT` rows are what
+  // we EXPECT (bill charged to a room), `CONFIRMATION` rows are what actually
+  // LANDED (an M-Pesa STK/C2B confirmation). Matching is the unit of truth the
+  // accountant reconciles against — stolen groundwork from Cloudbeds' "double
+  // ledger" reporting failure. Amounts are stored as minor units (int cents).
+
+  private toMinor(amount: number): number {
+    return Math.round(amount * 100);
+  }
+
+  recordIntent(input: PaymentRecordInput, now = new Date().toISOString()): PaymentLedgerRow {
+    const insert = this.db.prepare(`
+      INSERT OR IGNORE INTO mpesa_ledger
+        (id, kind, status, method, amount_minor, currency, reference, guest_name, room_number,
+         folio_id, reservation_id, operator_id, idempotency_key, recorded_at)
+      VALUES (?, 'INTENT', 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const select = this.db.prepare(`SELECT * FROM mpesa_ledger WHERE idempotency_key = ?`);
+
+    const run = this.db.transaction(() => {
+      const id = randomUUID();
+      insert.run(
+        id,
+        input.method,
+        this.toMinor(input.amount),
+        input.currency,
+        input.reference ?? null,
+        input.guestName,
+        input.roomNumber,
+        input.folioId ?? null,
+        input.reservationId ?? null,
+        input.operatorId ?? null,
+        input.idempotencyKey,
+        now,
+      );
+      return select.get(input.idempotencyKey);
+    });
+    return rowToPayment(run() as Record<string, unknown>);
+  }
+
+  /**
+   * Record an M-Pesa confirmation (STK callback / C2B that actually landed).
+   * Idempotent on the M-Pesa receipt number (a single receipt can never be
+   * double-posted). Auto-matches a unique PENDING intent with the exact same
+   * method + amount, preferring the oldest one.
+   */
+  recordConfirmation(
+    input: PaymentConfirmationInput,
+    now = new Date().toISOString(),
+  ): PaymentLedgerRow {
+    const insert = this.db.prepare(`
+      INSERT OR IGNORE INTO mpesa_ledger
+        (id, kind, status, method, amount_minor, currency, reference, receipt, phone_tail,
+         guest_name, room_number, idempotency_key, recorded_at)
+      VALUES (?, 'CONFIRMATION', 'UNMATCHED', ?, ?, ?, ?, ?, ?, '', '', ?, ?)
+    `);
+    const select = this.db.prepare(`SELECT * FROM mpesa_ledger WHERE idempotency_key = ?`);
+    const findIntent = this.db.prepare(`
+      SELECT id FROM mpesa_ledger
+      WHERE kind='INTENT' AND status='PENDING'
+        AND method=? AND amount_minor=?
+      ORDER BY recorded_at ASC
+      LIMIT 2
+    `);
+    const matchBoth = this.db.prepare(`
+      UPDATE mpesa_ledger SET status='MATCHED', matched_at=?, matched_intent_id=?
+        WHERE id=?
+    `);
+
+    const run = this.db.transaction(() => {
+      const id = randomUUID();
+      insert.run(
+        id,
+        input.method,
+        this.toMinor(input.amount),
+        input.currency,
+        input.reference ?? null,
+        input.receipt,
+        input.phoneTail ?? null,
+        input.idempotencyKey,
+        now,
+      );
+      const row = select.get(input.idempotencyKey) as Record<string, unknown>;
+      if (!row) return rowToPayment(row as Record<string, unknown>);
+
+      // Auto-match only when EXACTLY ONE candidate intent exists (no guessing
+      // on ambiguous payments — the accountant decides those by hand).
+      const candidates = findIntent.all(input.method, this.toMinor(input.amount)) as Array<{
+        id: string;
+      }>;
+      if (candidates.length === 1) {
+        matchBoth.run(now, candidates[0].id, String(row.id));
+        matchBoth.run(now, String(row.id), candidates[0].id);
+        row.status = 'MATCHED';
+        row.matched_at = now;
+        row.matched_intent_id = String(row.id);
+      }
+      return row;
+    });
+    return rowToPayment(run() as Record<string, unknown>);
+  }
+
+  /** Manual (accountant-led) link: a confirmation is joined to a specific intent. */
+  matchConfirmation(
+    confirmationId: string,
+    intentId: string,
+    operatorId?: string,
+    now = new Date().toISOString(),
+  ): PaymentLedgerRow | null {
+    const tx = this.db.transaction((): PaymentLedgerRow | null => {
+      const row = this.db
+        .prepare(`SELECT * FROM mpesa_ledger WHERE id=?`)
+        .get(confirmationId) as Record<string, unknown> | null;
+      if (!row || row.kind !== 'CONFIRMATION') return null;
+      this.db
+        .prepare(
+          `UPDATE mpesa_ledger SET status='MATCHED', matched_at=?, matched_intent_id=?, operator_id=COALESCE(?, operator_id) WHERE id=?`,
+        )
+        .run(now, intentId, operatorId ?? null, confirmationId);
+      this.db
+        .prepare(
+          `UPDATE mpesa_ledger SET status='MATCHED', matched_at=?, matched_intent_id=? WHERE id=?`,
+        )
+        .run(now, confirmationId, intentId);
+      return rowToPayment(row);
+    });
+    return tx();
+  }
+
+  listLedger(limit = 100): PaymentLedgerRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, kind, status, etims_state, method, amount_minor, currency, reference, receipt,
+                guest_name, room_number, folio_id, reservation_id, operator_id, idempotency_key,
+                recorded_at, matched_at, matched_intent_id
+         FROM mpesa_ledger ORDER BY recorded_at DESC LIMIT ?`,
+      )
+      .all(limit) as Array<Record<string, unknown>>;
+    return rows.map(rowToPayment);
+  }
+
+  ledgerSummary(): MpesaLedgerSummary {
+    const byStatus = this.db
+      .prepare(`SELECT kind, status, COUNT(*) AS n FROM mpesa_ledger GROUP BY kind, status`)
+      .all() as Array<{ kind: string; status: string; n: number }>;
+    const summary: MpesaLedgerSummary = {
+      pendingIntents: 0,
+      unmatchedConfirmations: 0,
+      matched: 0,
+      reversed: 0,
+      todayTotalMinorByMethod: {},
+    };
+    for (const r of byStatus) {
+      if (r.kind === 'INTENT' && r.status === 'PENDING') summary.pendingIntents += Number(r.n);
+      if (r.kind === 'CONFIRMATION' && r.status === 'UNMATCHED')
+        summary.unmatchedConfirmations += Number(r.n);
+      if (r.status === 'MATCHED') summary.matched += Number(r.n);
+      if (r.status === 'REVERSED') summary.reversed += Number(r.n);
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const totals = this.db
+      .prepare(
+        `SELECT method, SUM(amount_minor) AS total FROM mpesa_ledger
+         WHERE status='MATCHED' AND substr(recorded_at,1,10)=? GROUP BY method`,
+      )
+      .all(today) as Array<{ method: PaymentMethod; total: number }>;
+    for (const t of totals) summary.todayTotalMinorByMethod[t.method] = Number(t.total);
+    return summary;
+  }
+
+  /** Flag a ledger row as eTIMS-eligible/queued (KRA transmission is the connector job). */
+  markEtims(id: string, state: EtimsState): void {
+    this.db.prepare(`UPDATE mpesa_ledger SET etims_state=? WHERE id=?`).run(state, id);
   }
 
   close(): void {
