@@ -6,7 +6,7 @@ import { Messaging } from './views/Messaging';
 import { WorkOrders } from './views/WorkOrders';
 import { Revenue } from './views/Revenue';
 import { Settings } from './views/Settings';
-import { syncStatus } from './offline/queue';
+import { readSyncStatus, subscribeSyncStatus, unwrap, requireBridge } from './offline/sync-client';
 import type { SyncStatus } from './types';
 
 export type ViewKey =
@@ -22,18 +22,35 @@ const NAV: Array<{ key: ViewKey; label: string }> = [
   { key: 'settings', label: 'Settings' },
 ];
 
+export interface ConsoleConfig {
+  propertyId: string | null;
+  dbAvailable: boolean;
+  serverUrl: string;
+  serverToken: string;
+}
+
 export function App() {
   const [view, setView] = useState<ViewKey>('frontdesk');
   const [status, setStatus] = useState<SyncStatus | null>(null);
+  const [config, setConfig] = useState<ConsoleConfig | null>(null);
 
-  const refresh = () => {
-    void syncStatus().then(setStatus);
-  };
-
+  // Authored config is pulled once from main (env-orchestrated); the status
+  // badge is live through the pushed `sync:updated` channel (no polling).
   useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 15000);
-    return () => clearInterval(t);
+    let unsub: () => void = () => undefined;
+    void readSyncStatus().then(setStatus);
+    void (async () => {
+      if (!window.hotelia) return;
+      const conf = await unwrap(requireBridge().conf.get());
+      setConfig({
+        propertyId: conf.propertyId ?? null,
+        dbAvailable: conf.db.available,
+        serverUrl: conf.server.url,
+        serverToken: conf.server.token,
+      });
+    })().catch(() => undefined);
+    unsub = subscribeSyncStatus(setStatus);
+    return () => unsub();
   }, []);
 
   return (
@@ -56,19 +73,19 @@ export function App() {
         </nav>
         <div
           className={`sync-badge ${status?.online ? 'online' : 'offline'}`}
-          title="Offline sync queue status"
+          title="Offline sync queue status (SQLite, single writer)"
         >
           {status?.online ? '● Online' : `● Offline · ${status?.queued ?? 0} queued`}
         </div>
       </aside>
       <main className="content">
-        {view === 'frontdesk' && <FrontDesk />}
-        {view === 'housekeeping' && <Housekeeping />}
-        {view === 'pos' && <Pos />}
+        {view === 'frontdesk' && <FrontDesk config={config} />}
+        {view === 'housekeeping' && <Housekeeping config={config} />}
+        {view === 'pos' && <Pos config={config} />}
         {view === 'messaging' && <Messaging />}
         {view === 'workorders' && <WorkOrders />}
         {view === 'revenue' && <Revenue />}
-        {view === 'settings' && <Settings />}
+        {view === 'settings' && <Settings config={config} />}
       </main>
     </div>
   );

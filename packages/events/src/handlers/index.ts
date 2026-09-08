@@ -15,6 +15,7 @@ export const EVENT_TYPES = {
 
   // Rooms
   ROOM_STATUS_CHANGED: 'room.status_changed',
+  ROOM_KEY_GENERATED: 'room.key_generated',
 
   // Folio
   FOLIO_BALANCE_UPDATED: 'folio.balance_updated',

@@ -1,5 +1,31 @@
 import net from 'net';
 import { EventEmitter } from 'events';
+import { randomUUID } from 'crypto';
+import type { LockEncodeInput, LockLinkInput } from '@hotelia/shared';
+import { OfflineActionStore, type OfflineActionRecord } from '../offline/store';
+import { logger } from '../logger';
+
+/**
+ * ───────────────────────────────────────────────────────────────────────────
+ * HARDWARE BRIDGE — DOOR-LOCK ENCODERS
+ *
+ * Failure model (previous version hanging the IPC call on a dead encoder is
+ * eliminated):
+ *  1. Every TCP attempt is bounded by a 5 s connection timeout.
+ *  2. Each encoder channel is guarded by a CircuitBreaker
+ *     (CLOSED → OPEN → (cooldown) → CLOSED), plus a manual PAUSED state.
+ *     Once OPEN, new encodes are rejected *immediately* without touching the
+ *     socket; the item goes to the SQLite offline store instead.
+ *  3. Any failure (timeout / unreachable / protocol-NACK / OPEN breaker)
+ *     funnels the encode into the SAME `offline_actions` table used by every
+ *     other critical action (idempotency_key = `lock:<deviceId>:<room>`), so
+ *     the IPC call returns instantly with `status: 'queued_offline'` and the
+ *     background retry loop re-attempts the LAN encoder on a 10 s cadence.
+ *
+ * The keycard is then *guaranteed*: either the encoder ack'd it live, or the
+ * exact request is durable in SQLite and retried. No dual-queue drift.
+ * ───────────────────────────────────────────────────────────────────────────
+ */
 
 export type LockChannels = 'tcp' | 'serial';
 
@@ -22,16 +48,73 @@ export interface EncodeResult {
   roomNumber: string;
   credential: string;
   status: 'encoded' | 'queued_offline' | 'error';
+  queuedId?: string;
+  error?: string;
   ts: string;
 }
 
-/**
- * SmartLock encoder channel. The TCP implementation talks directly to on-LAN
- * encoder boxes (e.g. Assa Abloy / SALTO bridge) when the cloud is down, so a
- * front-desk operator can still issue physical keycards. Serial is plugged via
- * a provider so native serialport is optional at build time.
- * Loophole #1 fix (hardware half).
- */
+// ── Circuit breaker ─────────────────────────────────────────────────────────
+
+export type BreakerState = 'CLOSED' | 'OPEN' | 'PAUSED';
+
+export class CircuitBreaker {
+  private state: BreakerState = 'CLOSED';
+  private consecutiveFailures = 0;
+  private openedAt = 0;
+
+  constructor(
+    private readonly failureThreshold = 3,
+    private readonly cooldownMs = 30_000,
+  ) {}
+
+  getState(): BreakerState {
+    return this.state;
+  }
+
+  /** Would an encode be allowed to hit the wire right now? */
+  allow(): boolean {
+    if (this.state === 'PAUSED') return false;
+    if (this.state === 'OPEN') {
+      // Cooldown elapsed → half-open probe attempt.
+      if (Date.now() - this.openedAt >= this.cooldownMs) {
+        this.state = 'CLOSED';
+        this.consecutiveFailures = 0;
+        return true;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  onSuccess(): void {
+    this.consecutiveFailures = 0;
+    this.state = 'CLOSED';
+  }
+
+  onFailure(): void {
+    this.consecutiveFailures += 1;
+    if (this.consecutiveFailures >= this.failureThreshold) {
+      this.state = 'OPEN';
+      this.openedAt = Date.now();
+      logger.warn('lock:breaker-opened', {
+        threshold: this.failureThreshold,
+        cooldownMs: this.cooldownMs,
+      });
+    }
+  }
+
+  pause(): void {
+    this.state = 'PAUSED';
+  }
+
+  resume(): void {
+    this.state = 'CLOSED';
+    this.consecutiveFailures = 0;
+  }
+}
+
+// ── Transport adapters ────────────────────────────────────────────────────
+
 export abstract class LockChannelAdapter {
   abstract readonly kind: LockChannels;
   abstract encode(req: EncodeRequest): Promise<EncodeResult>;
@@ -40,43 +123,59 @@ export abstract class LockChannelAdapter {
 
 export class TcpLockChannel extends LockChannelAdapter {
   readonly kind: LockChannels = 'tcp';
-  constructor(private endpoint: string) {
+  private static readonly ENCODE_CMD = Buffer.from('ENCODE', 'ascii');
+  private static readonly CONNECT_TIMEOUT_MS = 5_000;
+
+  constructor(private readonly endpoint: string) {
     super();
   }
 
-  private static readonly ENCODE_CMD = Buffer.from('ENCODE', 'ascii');
-
   encode(req: EncodeRequest): Promise<EncodeResult> {
     return new Promise((resolve) => {
-      const [host, rawPort] = this.endpoint.split(':');
-      const port = Number(rawPort ?? 9100);
-      const sock = net.connect({ host, port });
-
-      const timeout = setTimeout(() => {
+      const host = this.endpoint.split(':')[0];
+      const port = Number(this.endpoint.split(':')[1] ?? 9100);
+      let settled = false;
+      const sock = net.connect({ host, port, timeout: TcpLockChannel.CONNECT_TIMEOUT_MS });
+      const settle = (result: EncodeResult): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         sock.destroy();
-        resolve(this.err(req, 'timeout talking to lock encoder'));
-      }, 3000);
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => {
+        settle(this.buildResult(req, 'queued_offline', 'encoder timed out (5000ms)'));
+      }, TcpLockChannel.CONNECT_TIMEOUT_MS);
 
       sock.on('connect', () => {
+        sock.setTimeout(TcpLockChannel.CONNECT_TIMEOUT_MS, () => {
+          settle(this.buildResult(req, 'queued_offline', 'encoder read timeout (5000ms)'));
+        });
         sock.write(this.buildPacket(req));
       });
       sock.on('data', (data) => {
-        clearTimeout(timeout);
-        sock.destroy();
         const ack = data.toString('ascii').trim();
-        resolve({ ...this.base(req), status: ack.startsWith('OK') ? 'encoded' : 'error' });
+        if (ack.startsWith('OK')) {
+          settle(this.buildResult(req, 'encoded'));
+        } else {
+          settle(this.buildResult(req, 'error', `encoder NACK: ${ack}`));
+        }
       });
-      sock.on('error', () => {
-        clearTimeout(timeout);
-        resolve(this.err(req, 'encoder unreachable on LAN (queued for sync)'));
+      sock.on('timeout', () => {
+        settle(this.buildResult(req, 'queued_offline', 'encoder timeout (no ACK within 5000ms)'));
+      });
+      sock.on('error', (err) => {
+        settle(this.buildResult(req, 'queued_offline', `encoder unreachable: ${err.message}`));
       });
     });
   }
 
   ping(): Promise<boolean> {
     return new Promise((resolve) => {
-      const [host, rawPort] = this.endpoint.split(':');
-      const sock = net.connect({ host: host ?? '127.0.0.1', port: Number(rawPort ?? 9100) });
+      const host = this.endpoint.split(':')[0];
+      const port = Number(this.endpoint.split(':')[1] ?? 9100);
+      const sock = net.connect({ host, port });
       const t = setTimeout(() => {
         sock.destroy();
         resolve(false);
@@ -110,17 +209,21 @@ export class TcpLockChannel extends LockChannelAdapter {
       ts: new Date().toISOString(),
     };
   }
-  private err(req: EncodeRequest, msg: string): EncodeResult {
-    const r = this.base(req);
-    return { ...r, status: msg.includes('unreachable') ? 'queued_offline' : 'error', ts: r.ts };
+
+  private buildResult(
+    req: EncodeRequest,
+    status: EncodeResult['status'],
+    error?: string,
+  ): EncodeResult {
+    return { ...this.base(req), status, error };
   }
 }
 
 export class SerialLockChannel extends LockChannelAdapter {
   readonly kind: LockChannels = 'serial';
   constructor(
-    private provider: LockSerialProvider | null,
-    private pathHint = '/dev/ttyUSB0',
+    private readonly provider: LockSerialProvider | null,
+    private readonly pathHint = '/dev/ttyUSB0',
   ) {
     super();
   }
@@ -133,15 +236,14 @@ export class SerialLockChannel extends LockChannelAdapter {
       ts: new Date().toISOString(),
     };
     if (!this.provider) {
-      return { ...base, status: 'queued_offline' };
+      return { ...base, status: 'queued_offline', error: 'no serial provider configured' };
     }
     const ok = await this.provider.write(req);
     return { ...base, status: ok ? 'encoded' : 'error' };
   }
 
   async ping(): Promise<boolean> {
-    if (!this.provider) return false;
-    return this.provider.ping();
+    return this.provider?.ping() ?? false;
   }
 }
 
@@ -150,12 +252,17 @@ export interface LockSerialProvider {
   ping(): Promise<boolean>;
 }
 
+// ── Controller ─────────────────────────────────────────────────────────────
+
+const LOCK_ACTION_TYPE = 'roomKeyGenerate';
+
 export class LockBridgeController extends EventEmitter {
   private devices = new Map<string, LockDevice>();
   private channels = new Map<LockChannels, LockChannelAdapter>();
-  private offlineQueue: EncodeRequest[] = [];
+  private breakers = new Map<string, CircuitBreaker>();
+  private retryTimer: NodeJS.Timeout | null = null;
 
-  constructor() {
+  constructor(private readonly store?: OfflineActionStore) {
     super();
     this.channels.set('serial', new SerialLockChannel(null));
   }
@@ -173,23 +280,160 @@ export class LockBridgeController extends EventEmitter {
 
   registerDevice(d: LockDevice): void {
     this.devices.set(d.id, d);
+    d.online = false;
   }
 
   list(): LockDevice[] {
     return [...this.devices.values()];
   }
 
+  getBreaker(deviceId: string): CircuitBreaker {
+    let b = this.breakers.get(deviceId);
+    if (!b) {
+      b = new CircuitBreaker();
+      this.breakers.set(deviceId, b);
+    }
+    return b;
+  }
+
+  /**
+   * Non-blocking encode path. Returns immediately with an EncodeResult; never
+   * throws and never waits on the encoder beyond 5 s. Failures durable-queue
+   * into SQLite and are retried in the background.
+   */
   async encode(req: EncodeRequest): Promise<EncodeResult> {
     const dev = this.devices.get(req.deviceId);
-    if (!dev) return { ...req, status: 'error', ts: new Date().toISOString() } as EncodeResult;
+    const base: Omit<EncodeResult, 'status'> = {
+      deviceId: req.deviceId,
+      roomNumber: req.roomNumber,
+      credential: req.credential,
+      ts: new Date().toISOString(),
+    };
+    if (!dev) {
+      return { ...base, status: 'error', error: 'unknown encoder device' };
+    }
     const adapter = this.channels.get(dev.channel);
-    if (!adapter) return { ...req, status: 'error', ts: new Date().toISOString() } as EncodeResult;
+    if (!adapter) {
+      return { ...base, status: 'error', error: `no adapter for channel: ${dev.channel}` };
+    }
+
+    const breaker = this.getBreaker(req.deviceId);
+    if (!breaker.allow()) {
+      const queued = this.persistOffline(req);
+      return {
+        ...base,
+        status: 'queued_offline',
+        queuedId: queued.id,
+        error: 'circuit open (fast-fail)->queued',
+      };
+    }
 
     const result = await adapter.encode(req);
-    if (result.status === 'queued_offline') {
-      this.offlineQueue.push(req);
-      this.emit('offline-encode-queued', req);
+    if (result.status === 'encoded') {
+      breaker.onSuccess();
+      dev.online = true;
+      this.emit('encode-completed', result);
+      return result;
     }
-    return result;
+
+    breaker.onFailure();
+    dev.online = false;
+    const queued = this.persistOffline(req);
+    this.ensureRetryLoop();
+    return {
+      ...result,
+      status: 'queued_offline',
+      queuedId: queued.id,
+      error: result.error ?? 'encoder offline -> queued',
+    };
+  }
+
+  /** Durably persist a failed encoder request into the shared SQLite store. */
+  private persistOffline(req: EncodeRequest): OfflineActionRecord {
+    const input = {
+      actionType: LOCK_ACTION_TYPE as 'roomKeyGenerate',
+      idempotencyKey: `lock:${req.deviceId}:${req.roomNumber}`,
+      payload: { deviceId: req.deviceId, roomNumber: req.roomNumber, credential: req.credential },
+    };
+    this.emit('offline-encode-queued', req);
+    if (!this.store) {
+      // No store injected (headless) — still emit so callers stay informed.
+      return {
+        id: randomUUID(),
+        ...input,
+        status: 'FAILED' as const,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        retryCount: 0,
+        lastError: 'no offline store injected — caller must retry',
+      };
+    }
+    try {
+      return this.store.insert(input);
+    } catch (err) {
+      logger.error('lock:persist-offline-failed', { deviceId: req.deviceId }, err as Error);
+      return {
+        id: randomUUID(),
+        ...input,
+        status: 'FAILED' as const,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        retryCount: 0,
+        lastError: 'sqlite unavailable',
+      };
+    }
+  }
+
+  /** Background retry loop: drain LOCK_ACTION_TYPE rows from SQLite every 10 s. */
+  private ensureRetryLoop(): void {
+    if (this.retryTimer) return;
+    this.retryTimer = setInterval(() => void this.drainRetryQueue(), 10_000);
+    this.retryTimer.unref();
+  }
+
+  private async drainRetryQueue(): Promise<void> {
+    if (!this.store) return;
+    for (;;) {
+      const record = this.store.claimNext();
+      if (!record) break;
+      if (record.actionType !== LOCK_ACTION_TYPE) {
+        // Not ours to deliver — put it back for the sync engine.
+        this.store.markFailed(record.id, 'non-lock action removed from lock drain');
+        continue;
+      }
+      const req: EncodeRequest = {
+        deviceId: String(record.payload.deviceId),
+        roomNumber: String(record.payload.roomNumber),
+        credential: String(record.payload.credential),
+      };
+      const dev = this.devices.get(req.deviceId);
+      if (!dev) {
+        this.store.markFailed(record.id, 'encoder device no longer registered');
+        continue;
+      }
+      const breaker = this.getBreaker(req.deviceId);
+      const adapter = this.channels.get(dev.channel);
+      if (!adapter || !breaker.allow()) {
+        this.store.markFailed(record.id, 'breaker open / no adapter — will retry on next pass');
+        continue;
+      }
+      const result = await adapter.encode(req);
+      if (result.status === 'encoded') {
+        breaker.onSuccess();
+        dev.online = true;
+        this.store.markComplete(record.id);
+        this.emit('encode-completed', result);
+        logger.info('lock:retry-succeeded', { deviceId: req.deviceId, room: req.roomNumber });
+      } else {
+        breaker.onFailure();
+        dev.online = false;
+        this.store.markFailed(record.id, result.error ?? 'encoder still offline');
+      }
+    }
+  }
+
+  shutdown(): void {
+    if (this.retryTimer) clearInterval(this.retryTimer);
+    this.retryTimer = null;
   }
 }

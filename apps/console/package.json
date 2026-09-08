@@ -15,26 +15,27 @@
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@hotelia/database": "*",
-    "@hotelia/shared": "*",
-    "@hotelia/events": "*",
     "@hotelia/channels": "*",
+    "@hotelia/database": "*",
+    "@hotelia/events": "*",
     "@hotelia/integrations": "*",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "dexie": "^4.0.0",
+    "@hotelia/shared": "*",
+    "better-sqlite3": "^13.0.3",
     "cors": "^2.8.5",
-    "express": "^4.21.0"
+    "express": "^4.21.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
-    "electron": "^36.0.0",
-    "vite": "^6.3.0",
-    "@vitejs/plugin-react": "^4.5.0",
-    "typescript": "~5.9.3",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/cors": "^2.8.0",
+    "@types/express": "^4.17.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
-    "@types/express": "^4.17.0",
-    "@types/cors": "^2.8.0",
-    "cross-env": "^7.0.3"
+    "@vitejs/plugin-react": "^4.5.0",
+    "cross-env": "^7.0.3",
+    "electron": "^36.0.0",
+    "typescript": "~5.9.3",
+    "vite": "^6.3.0"
   }
 }

@@ -341,3 +341,45 @@ pre.box {
   white-space: pre-wrap;
   font-family: ui-monospace, "Cascadia Code", monospace;
 }
+/* console refactor additions */
+.pill.occupied {
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+.pill.dirty {
+  background: color-mix(in oklab, var(--warn) 20%, transparent);
+  color: var(--warn);
+}
+.result.ok {
+  color: var(--good);
+}
+.small {
+  font-size: 12px;
+}
+.row.between {
+  justify-content: space-between;
+}
+.room-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+.room-tile {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.room-tile.occupied {
+  border-color: color-mix(in oklab, var(--accent) 45%, transparent);
+}
+.room-tile-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.full {
+  grid-column: 1 / -1;
+}

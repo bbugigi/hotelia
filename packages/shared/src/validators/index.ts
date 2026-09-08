@@ -115,3 +115,84 @@ export type CreateReservationInput = z.infer<typeof createReservationSchema>;
 export type CreateGuestInput = z.infer<typeof createGuestSchema>;
 export type CreateOrderInput = z.infer<typeof createOrderSchema>;
 export type CreateWorkOrderInput = z.infer<typeof createWorkOrderSchema>;
+
+// ──────────────────────────────────────────────
+// Console IPC contracts (validated on both sides)
+// Schema ids: 'console' namespace so the desktop app and any future
+// local-agent share the SAME accepted shapes.
+// ──────────────────────────────────────────────
+
+export const syncActionSchema = z.enum([
+  'checkin',
+  'checkout',
+  'roomKeyGenerate',
+  'posOrder',
+  'folioTransfer',
+  'maintenanceOrder',
+]);
+export type SyncAction = z.infer<typeof syncActionSchema>;
+
+export const syncEnqueueSchema = z.object({
+  idempotencyKey: z.string().min(8).max(128),
+  actionType: syncActionSchema,
+  payload: z.record(z.string(), z.unknown()),
+});
+export type SyncEnqueueInput = z.infer<typeof syncEnqueueSchema>;
+
+/**
+ * Shared contract for argument-less IPC handlers. The renderer may call with
+ * nothing, or an empty object; either parses identically.
+ */
+export const ipcNoArgsSchema = z.undefined().or(z.object({}).passthrough());
+
+export const lockChannelSchema = z.enum(['tcp', 'serial']);
+export type LockChannel = z.infer<typeof lockChannelSchema>;
+
+export const lockEncodeSchema = z.object({
+  deviceId: z.string().min(1).max(100),
+  roomNumber: z
+    .string()
+    .min(1)
+    .max(10)
+    .regex(/^[a-zA-Z0-9-]+$/),
+  credential: z.string().min(4),
+});
+export type LockEncodeInput = z.infer<typeof lockEncodeSchema>;
+
+export const lockLinkSchema = z.object({
+  channel: lockChannelSchema,
+  endpoint: z.string().min(1).max(255).optional(),
+});
+export type LockLinkInput = z.infer<typeof lockLinkSchema>;
+
+export const streamEventsSchema = z.array(z.string().min(1).max(255)).max(32);
+export type StreamEventsInput = z.infer<typeof streamEventsSchema>;
+
+export const packetSchema = z.object({
+  type: z.string().min(1).max(255),
+  payload: z.record(z.string(), z.unknown()),
+});
+export type PacketInput = z.infer<typeof packetSchema>;
+
+// ──────────────────────────────────────────────
+// Real-time DB reads (step 5)
+// ──────────────────────────────────────────────
+
+export const propertyQuerySchema = z.object({
+  propertyId: z.string().uuid(),
+});
+
+export const posVerifySchema = z.object({
+  propertyId: z.string().uuid(),
+  roomNumber: z.string().min(1).max(10),
+  lastName: z.string().min(1).max(100),
+});
+export type PosVerifyInput = z.infer<typeof posVerifySchema>;
+
+export const posChargeSchema = posVerifySchema.extend({
+  description: z.string().min(1).max(500),
+  amount: z.number().positive().max(1_000_000),
+  itemName: z.string().min(1).max(200).optional(),
+  operatorId: z.string().uuid().optional(),
+});
+export type PosChargeInput = z.infer<typeof posChargeSchema>;

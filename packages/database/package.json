@@ -2,6 +2,8 @@
   "name": "@hotelia/database",
   "version": "0.1.0",
   "private": true,
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
   "scripts": {
     "generate": "prisma generate",
     "push": "prisma db push",
@@ -9,6 +11,7 @@
     "deploy": "prisma migrate deploy",
     "seed": "ts-node prisma/seed.ts",
     "studio": "prisma studio",
+    "build": "npm run generate && tsc -p tsconfig.cjs.json",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit"
   },
